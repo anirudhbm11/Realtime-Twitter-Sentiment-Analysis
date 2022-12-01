@@ -1,11 +1,17 @@
-from flask import Flask, render_template, request, Response, redirect, url_for, stream_template
+from flask import Flask, render_template, request, redirect, url_for
 import socket
+from flask_socketio import SocketIO
+from threading import Lock
 from kafka import KafkaConsumer
-from flask_socketio import SocketIO, send
+import json
+from training.inference import MLModel
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app)
+socketio = SocketIO(app,cors_allowed_origins='*')
+
+thread = None
+thread_lock = Lock()
 
 @app.route('/',methods = ['POST', 'GET'])
 def index_page():
@@ -19,38 +25,50 @@ def index_page():
             s.send(topic.encode())
 
         return redirect(url_for('result'))
-        # return render_template("result.html")
 
     return render_template("index.html")
 
-def stream_template(template_name, **context):                                                                                                                                                 
-    app.update_template_context(context)                                                                                                                                                       
-    t = app.jinja_env.get_template(template_name)                                                                                                                                              
-    rv = t.stream(context)                                                                                                                                                                     
-    rv.disable_buffering()                                                                                                                                                                     
-    return rv
+# def background_thread():
+#     print("Generating random sensor values")
+#     while True:
+#         dummy_sensor_value = round(random() * 100, 3)
+#         socketio.emit('sending_message', {'value': dummy_sensor_value, "date": "today"})
+#         # socketio.sleep(1)
 
-@socketio.on('json')
-def sending_message(json):
+@socketio.on('connect')
+def connect():
+    print('Client connected')
+
+    global thread
+    with thread_lock:
+        if thread is None:
+            thread = socketio.start_background_task(sending_message)
+
+@socketio.on('disconnect')
+def disconnect():
+    print('Client disconnected')
+
+def sending_message():
     consumer = KafkaConsumer("twitter_data",bootstrap_servers="localhost:9092")
     for msg in consumer:
-        send(msg, json=True)
+        json_data = json.loads(msg.value.decode("utf-8"))
+        text_data = json_data["data"]["text"]
+        prediction = get_prediction(text_data)
+        print("Prediction: ",prediction)
+        socketio.emit('sending_message',text_data)
+        socketio.emit('sending_prediction', {"data": str(prediction)})
+        socketio.sleep(0)
 
-# @app.route('/result')
-# def result():
-#     consumer = KafkaConsumer("twitter_data",bootstrap_servers="localhost:9092")
+def get_prediction(text):
+    models = MLModel()
+    model = models.select_model("logistic_regression")
+    prediction = model.predict(["Let's test this out. Not sure how it is gonna work"])[0]
+    return prediction
 
-#     def sending_message():
-#         for msg in consumer:
-#             print(msg)
-#             yield(str(msg))
-    
-#     # return Response(sending_message(), mimetype="text/plain")
-#     # return Response(sending_message(), mimetype="multipart/x-mixed-replace")
-#     rows = sending_message()                                                                                                                                                                          
-#     return Response(stream_template('result.html', rows=rows))
+@app.route('/result')
+def result():
+    return render_template("result.html")
 
 
 if __name__ == "__main__":
-    # app.run(port= 5003, debug=True)
-    socketio.run(app, port=5003, debug=True)
+    socketio.run(app, port=5003)
